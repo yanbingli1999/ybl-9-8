@@ -31,6 +31,7 @@ export interface TripSettlement {
   events: string[];
   lateCount: number;
   damageCount: number;
+  escortClerkId?: string;
 }
 
 export const calculateReputationGrade = (score: number): { grade: ReputationGrade; priceBonus: number } => {

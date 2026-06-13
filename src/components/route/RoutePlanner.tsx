@@ -1,8 +1,10 @@
-import { Truck, MapPin, Clock, Coins, AlertTriangle } from 'lucide-react';
+import { Truck, MapPin, Clock, Coins, AlertTriangle, Shield, User } from 'lucide-react';
 import { useGameStore } from '../../store/useGameStore';
 import { calculateRouteTime, calculateLoad, calculateTripCost } from '../../utils/routeCalc';
+import { getClerkTypeInfo, getPersonalityInfo, calculateClerkBonus } from '../../utils/gameLogic';
 import CommissionCard from '../port/CommissionCard';
 import { useMemo, useState } from 'react';
+import type { Clerk } from '../../../shared/types';
 
 const RoutePlanner = () => {
   const {
@@ -13,12 +15,15 @@ const RoutePlanner = () => {
     goodsList,
     currentWeather,
     player,
+    clerks,
     selectedCommissions,
     selectedVehicle,
     selectedRoute,
+    selectedEscortClerkId,
     selectCommission,
     selectVehicle,
     selectRoute,
+    selectEscortClerk,
     startTrip,
     isDispatching,
     error,
@@ -29,6 +34,23 @@ const RoutePlanner = () => {
   const acceptedCommissions = commissions.filter(c => c.isAccepted && !c.isShipped && !c.isCompleted);
   
   const availableVehicles = vehicles.filter(v => v.isAvailable);
+  
+  const availableClerks = useMemo(() => {
+    return clerks.filter(c => 
+      c.status !== 'dismissed' && 
+      !c.assignedTripId && 
+      (c.assignment === 'idle' || c.assignment === 'escort')
+    );
+  }, [clerks]);
+  
+  const selectedEscortClerk = useMemo(() => {
+    return clerks.find(c => c.id === selectedEscortClerkId);
+  }, [clerks, selectedEscortClerkId]);
+  
+  const escortBonus = useMemo(() => {
+    if (!selectedEscortClerk) return null;
+    return calculateClerkBonus(selectedEscortClerk, 'escort');
+  }, [selectedEscortClerk]);
   
   const availableRoutes = useMemo(() => {
     if (!destinationId) return [];
@@ -257,9 +279,132 @@ const RoutePlanner = () => {
               )}
             </div>
             
+            {availableClerks.length > 0 && (
+              <div className="bg-white rounded-xl shadow-md p-5">
+                <h3 className="font-semibold text-slate-800 mb-4 flex items-center gap-2">
+                  <Shield className="w-5 h-5 text-amber-500" />
+                  选择押车伙计
+                </h3>
+                
+                <div className="space-y-3">
+                  <button
+                    onClick={() => selectEscortClerk(null)}
+                    className={`w-full p-3 rounded-lg border-2 transition-all text-left ${
+                      !selectedEscortClerkId
+                        ? 'border-amber-500 bg-amber-50'
+                        : 'border-slate-200 hover:border-slate-300'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-xl">🚫</span>
+                      <span className="font-medium text-slate-700">不派遣伙计</span>
+                    </div>
+                  </button>
+                  
+                  {availableClerks.map(clerk => {
+                    const typeInfo = getClerkTypeInfo(clerk.type);
+                    const personalityInfo = getPersonalityInfo(clerk.personality);
+                    const fatigueRatio = clerk.fatigue / clerk.maxFatigue;
+                    const bonus = calculateClerkBonus(clerk, 'escort');
+                    
+                    return (
+                      <button
+                        key={clerk.id}
+                        onClick={() => selectEscortClerk(clerk.id)}
+                        disabled={fatigueRatio > 0.9}
+                        className={`w-full p-3 rounded-lg border-2 transition-all text-left ${
+                          selectedEscortClerkId === clerk.id
+                            ? 'border-amber-500 bg-amber-50'
+                            : fatigueRatio > 0.9
+                            ? 'border-slate-100 opacity-50 cursor-not-allowed'
+                            : 'border-slate-200 hover:border-slate-300'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-3">
+                            <span className="text-2xl">{typeInfo.icon}</span>
+                            <div>
+                              <div className="font-medium text-slate-800">{clerk.name}</div>
+                              <div className="text-xs text-slate-500">
+                                {typeInfo.name} · Lv.{clerk.level} · {personalityInfo.name}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <div className="text-xs text-slate-400">疲劳</div>
+                            <div className={`text-sm font-medium ${
+                              fatigueRatio > 0.7 ? 'text-red-500' : 'text-green-600'
+                            }`}>
+                              {clerk.fatigue}/{clerk.maxFatigue}
+                            </div>
+                          </div>
+                        </div>
+                        
+                        <div className="flex flex-wrap gap-1">
+                          {bonus.speedBonus > 0 && (
+                            <span className="text-xs px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full">
+                              速度+{Math.round(bonus.speedBonus * 100)}%
+                            </span>
+                          )}
+                          {bonus.damageReduction > 0 && (
+                            <span className="text-xs px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full">
+                              减伤+{Math.round(bonus.damageReduction * 100)}%
+                            </span>
+                          )}
+                          {bonus.rewardBonus > 0 && (
+                            <span className="text-xs px-2 py-0.5 bg-green-100 text-green-700 rounded-full">
+                              奖励+{Math.round(bonus.rewardBonus * 100)}%
+                            </span>
+                          )}
+                          {fatigueRatio > 0.7 && (
+                            <span className="text-xs px-2 py-0.5 bg-red-100 text-red-700 rounded-full">
+                              疲劳过高
+                            </span>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            
             {selectedCommissionsData.length > 0 && (
               <div className="bg-white rounded-xl shadow-md p-5">
                 <h3 className="font-semibold text-slate-800 mb-4">运输预览</h3>
+                
+                {selectedEscortClerk && escortBonus && (
+                  <div className="mb-4 p-3 bg-amber-50 rounded-lg border border-amber-200">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Shield className="w-4 h-4 text-amber-600" />
+                      <span className="font-medium text-amber-800">
+                        {getClerkTypeInfo(selectedEscortClerk.type).name} {selectedEscortClerk.name} 随车押运
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap gap-2 text-xs">
+                      {escortBonus.speedBonus > 0 && (
+                        <span className="px-2 py-1 bg-purple-100 text-purple-700 rounded">
+                          速度 +{Math.round(escortBonus.speedBonus * 100)}%
+                        </span>
+                      )}
+                      {escortBonus.damageReduction > 0 && (
+                        <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded">
+                          减伤 +{Math.round(escortBonus.damageReduction * 100)}%
+                        </span>
+                      )}
+                      {escortBonus.rewardBonus > 0 && (
+                        <span className="px-2 py-1 bg-green-100 text-green-700 rounded">
+                          奖励 +{Math.round(escortBonus.rewardBonus * 100)}%
+                        </span>
+                      )}
+                      {escortBonus.negotiationBonus > 0 && (
+                        <span className="px-2 py-1 bg-pink-100 text-pink-700 rounded">
+                          谈判 +{Math.round(escortBonus.negotiationBonus * 100)}%
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
                 
                 <div className="space-y-4">
                   {loadCalculation && (

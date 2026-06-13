@@ -14,6 +14,10 @@ import type {
   Weather,
   GameEvent,
   ReputationGrade,
+  Clerk,
+  ClerkCandidate,
+  ClerkAssignment,
+  ClerkBonus,
 } from '../../shared/types';
 import { api } from '../services/api';
 import {
@@ -26,6 +30,14 @@ import {
   getCurrentDate,
   calculateWarehouseUsedSpace,
   calculateTotalGameHours,
+  hireClerk as hireClerkLogic,
+  restClerk as restClerkLogic,
+  addClerkExperience,
+  increaseClerkFatigue,
+  calculateCombinedBonus,
+  checkForMistake,
+  generateClerkCandidates,
+  getClerkTypeInfo,
 } from '../utils/gameLogic';
 import {
   calculateReputationGrade,
@@ -48,7 +60,11 @@ interface GameState {
   vehicles: PlayerVehicle[];
   warehouse: Warehouse;
   ledger: LedgerEntry[];
+  clerks: Clerk[];
+  clerkCandidates: ClerkCandidate[];
+  lastClerkRefreshDay: number;
   currentWeather: Weather | null;
+  selectedEscortClerkId: string | null;
   
   cities: City[];
   routes: Route[];
@@ -81,6 +97,7 @@ interface GameState {
   selectCommission: (commissionId: string) => void;
   selectVehicle: (vehicleId: string) => void;
   selectRoute: (routeId: string) => void;
+  selectEscortClerk: (clerkId: string | null) => void;
   
   startTrip: () => Promise<boolean>;
   processTripEvents: (tripId: string) => void;
@@ -95,6 +112,16 @@ interface GameState {
   updatePlayerGold: (amount: number) => void;
   updatePlayerReputation: (amount: number) => void;
   
+  hireClerk: (candidateId: string) => boolean;
+  dismissClerk: (clerkId: string) => void;
+  assignClerk: (clerkId: string, assignment: ClerkAssignment) => void;
+  restClerk: (clerkId: string) => void;
+  refreshClerkCandidates: () => void;
+  payClerkSalaries: () => void;
+  
+  getClerkBonuses: (assignment: ClerkAssignment) => ClerkBonus;
+  getAvailableClerks: (assignment?: ClerkAssignment) => Clerk[];
+  
   getAvailableVehicles: () => PlayerVehicle[];
   getAvailableRoutes: (destinationId: string) => Route[];
   getCurrentDate: () => string;
@@ -107,7 +134,11 @@ export const useGameStore = create<GameState>((set, get) => ({
   vehicles: createInitialSaveGame().vehicles,
   warehouse: createInitialSaveGame().warehouse,
   ledger: [],
+  clerks: createInitialSaveGame().clerks,
+  clerkCandidates: createInitialSaveGame().clerkCandidates,
+  lastClerkRefreshDay: createInitialSaveGame().lastClerkRefreshDay,
   currentWeather: null,
+  selectedEscortClerkId: null,
   
   cities: [],
   routes: [],
@@ -172,6 +203,9 @@ export const useGameStore = create<GameState>((set, get) => ({
           vehicles: saveData.vehicles,
           warehouse: saveData.warehouse,
           ledger: saveData.ledger,
+          clerks: saveData.clerks || [],
+          clerkCandidates: saveData.clerkCandidates || generateClerkCandidates(4),
+          lastClerkRefreshDay: saveData.lastClerkRefreshDay || 1,
           currentWeather: saveData.currentWeatherId 
             ? get().weatherList.find(w => w.id === saveData.currentWeatherId) || null
             : null,
@@ -196,6 +230,9 @@ export const useGameStore = create<GameState>((set, get) => ({
       vehicles: state.vehicles,
       warehouse: state.warehouse,
       ledger: state.ledger,
+      clerks: state.clerks,
+      clerkCandidates: state.clerkCandidates,
+      lastClerkRefreshDay: state.lastClerkRefreshDay,
       currentWeatherId: state.currentWeather?.id || 'sunny',
       savedAt: Date.now(),
     };
@@ -219,7 +256,11 @@ export const useGameStore = create<GameState>((set, get) => ({
       vehicles: initial.vehicles,
       warehouse: initial.warehouse,
       ledger: [],
+      clerks: initial.clerks,
+      clerkCandidates: initial.clerkCandidates,
+      lastClerkRefreshDay: initial.lastClerkRefreshDay,
       currentWeather: weather,
+      selectedEscortClerkId: null,
       selectedCommissions: [],
       selectedVehicle: null,
       selectedRoute: null,
@@ -236,12 +277,18 @@ export const useGameStore = create<GameState>((set, get) => ({
   
   generateDailyCommissions: () => {
     const state = get();
+    const bonus = state.getClerkBonuses('reception');
+    const qualityMultiplier = 1 + bonus.rewardBonus * 0.3;
+    
     const newCommissions = generateRandomCommissions(
       state.goodsList,
       state.cities,
       state.player.reputationGrade,
       6
-    );
+    ).map(c => ({
+      ...c,
+      reward: Math.floor(c.reward * (1 + bonus.rewardBonus * 0.5)),
+    }));
     
     const existingIds = state.commissions.filter(c => !c.isAccepted).map(c => c.id);
     const filteredCommissions = state.commissions.filter(c => c.isAccepted || c.isCompleted);
@@ -259,6 +306,9 @@ export const useGameStore = create<GameState>((set, get) => ({
     const goods = state.goodsList.find(g => g.id === commission.goodsId);
     if (!goods) return false;
     
+    const warehouseBonus = state.getClerkBonuses('warehouse');
+    const effectiveCapacity = Math.floor(state.warehouse.capacity * (1 + warehouseBonus.capacityBonus));
+    
     const newLoad = commission.quantity * goods.weight;
     const currentLoad = calculateWarehouseUsedSpace(
       state.commissions,
@@ -266,10 +316,61 @@ export const useGameStore = create<GameState>((set, get) => ({
       state.trips
     );
     
-    if (currentLoad + newLoad > state.warehouse.capacity) {
+    if (currentLoad + newLoad > effectiveCapacity) {
       set({ error: '仓库容量不足' });
       return false;
     }
+    
+    const bonus = state.getClerkBonuses('reception');
+    const mistakeResult = checkForMistake(state.clerks, 'reception');
+    
+    let finalReward = Math.floor(commission.reward * (1 + bonus.rewardBonus));
+    let reputationChange = 0;
+    let mistakeDescription = '';
+    
+    if (mistakeResult.madeMistake && mistakeResult.clerk) {
+      const mistakeClerk = mistakeResult.clerk;
+      switch (mistakeResult.severity) {
+        case 'minor':
+          finalReward = Math.floor(finalReward * 0.95);
+          reputationChange = -2;
+          mistakeDescription = `${mistakeClerk.name}在记录订单时犯了小错，佣金减少5%`;
+          break;
+        case 'moderate':
+          finalReward = Math.floor(finalReward * 0.85);
+          reputationChange = -5;
+          mistakeDescription = `${mistakeClerk.name}在谈判时出了差错，佣金减少15%`;
+          break;
+        case 'major':
+          finalReward = Math.floor(finalReward * 0.7);
+          reputationChange = -10;
+          mistakeDescription = `${mistakeClerk.name}犯了严重错误，客户非常不满，佣金减少30%`;
+          break;
+      }
+      
+      const updatedClerk = addClerkExperience(mistakeClerk, 5);
+      updatedClerk.totalMistakes += 1;
+      updatedClerk.performanceScore = Math.max(0, updatedClerk.performanceScore - 5);
+      set({
+        clerks: state.clerks.map(c => c.id === mistakeClerk.id ? updatedClerk : c),
+      });
+      
+      if (mistakeDescription) {
+        set({ error: mistakeDescription });
+      }
+    }
+    
+    const workingClerks = state.clerks.filter(c => c.assignment === 'reception' && c.status !== 'resting');
+    const updatedClerks = state.clerks.map(c => {
+      if (c.assignment === 'reception' && c.status !== 'resting') {
+        let updated = increaseClerkFatigue(c, 8);
+        updated = addClerkExperience(updated, 10);
+        updated.totalTasksCompleted += 1;
+        updated.performanceScore = Math.min(100, updated.performanceScore + 1);
+        return updated;
+      }
+      return c;
+    });
     
     const acceptedGameHours = calculateTotalGameHours(state.player.currentDay, state.player.timeOfDay);
     
@@ -277,6 +378,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       c.id === commissionId ? {
         ...c,
         isAccepted: true,
+        reward: finalReward,
         acceptedAt: Date.now(),
         acceptedGameHours,
       } : c
@@ -284,9 +386,19 @@ export const useGameStore = create<GameState>((set, get) => ({
     
     const usedSpace = currentLoad + newLoad;
     
+    let newReputation = state.player.reputation + reputationChange;
+    const repInfo = calculateReputationGrade(Math.max(0, newReputation));
+    
     set({
       commissions: updatedCommissions,
       warehouse: { ...state.warehouse, usedSpace },
+      clerks: updatedClerks,
+      player: {
+        ...state.player,
+        reputation: Math.max(0, newReputation),
+        reputationGrade: repInfo.grade as ReputationGrade,
+        priceBonus: repInfo.priceBonus,
+      },
     });
     
     return true;
@@ -319,13 +431,17 @@ export const useGameStore = create<GameState>((set, get) => ({
     set({ selectedRoute: routeId });
   },
   
+  selectEscortClerk: (clerkId: string | null) => {
+    set({ selectedEscortClerkId: clerkId });
+  },
+  
   startTrip: async () => {
     if (get().isDispatching) return false;
     set({ isDispatching: true });
     
     try {
       const state = get();
-      const { selectedCommissions, selectedVehicle, selectedRoute } = state;
+      const { selectedCommissions, selectedVehicle, selectedRoute, selectedEscortClerkId } = state;
       
       if (selectedCommissions.length === 0) {
         set({ error: '请选择要运输的货物' });
@@ -343,11 +459,17 @@ export const useGameStore = create<GameState>((set, get) => ({
       const vehicle = state.vehicles.find(v => v.id === selectedVehicle);
       const route = state.routes.find(r => r.id === selectedRoute);
       const weather = state.currentWeather || state.weatherList[0];
+      const escortClerk = selectedEscortClerkId ? state.clerks.find(c => c.id === selectedEscortClerkId) : null;
       
       if (!vehicle || !route) return false;
       
       if (!vehicle.isAvailable) {
         set({ error: '该车辆已在使用中' });
+        return false;
+      }
+      
+      if (escortClerk && (escortClerk.status === 'resting' || escortClerk.status === 'dismissed')) {
+        set({ error: '所选伙计无法出车' });
         return false;
       }
       
@@ -376,7 +498,15 @@ export const useGameStore = create<GameState>((set, get) => ({
         return false;
       }
       
-      const routeCalc = calculateRouteTime(route, vehicle, weather);
+      const escortBonus = escortClerk ? calculateCombinedBonus([escortClerk], 'escort') : null;
+      
+      const adjustedWeather = escortBonus ? {
+        ...weather,
+        speedModifier: weather.speedModifier + escortBonus.speedBonus,
+        damageChance: Math.max(0, weather.damageChance - escortBonus.damageReduction),
+      } : weather;
+      
+      const routeCalc = calculateRouteTime(route, vehicle, adjustedWeather);
       const tripCost = calculateTripCost(route, vehicle, routeCalc.totalTime);
       
       if (state.player.gold < tripCost) {
@@ -387,8 +517,9 @@ export const useGameStore = create<GameState>((set, get) => ({
       const departureGameHours = calculateTotalGameHours(state.player.currentDay, state.player.timeOfDay);
       const etaGameHours = departureGameHours + routeCalc.totalTime;
       
+      const tripId = generateId();
       const trip: Trip = {
-        id: generateId(),
+        id: tripId,
         vehicleId: selectedVehicle,
         routeId: selectedRoute,
         commissionIds: selectedCommissions,
@@ -405,9 +536,32 @@ export const useGameStore = create<GameState>((set, get) => ({
         totalCost: tripCost,
       };
       
+      if (escortClerk) {
+        trip.eventEffects.push({
+          title: '随车伙计',
+          effect: {
+            type: 'hint',
+            value: `${escortClerk.name}随车押运`,
+            description: `${getClerkTypeInfo(escortClerk.type).name}${escortClerk.name}负责此次押运`,
+          },
+        });
+      }
+      
       const updatedVehicles = state.vehicles.map(v =>
         v.id === selectedVehicle ? { ...v, isAvailable: false } : v
       );
+      
+      let updatedClerks = state.clerks;
+      if (escortClerk) {
+        updatedClerks = state.clerks.map(c =>
+          c.id === selectedEscortClerkId ? {
+            ...c,
+            status: 'working',
+            assignment: 'escort',
+            assignedTripId: tripId,
+          } : c
+        );
+      }
       
       const shippedGameHours = departureGameHours;
       const updatedCommissions = state.commissions.map(c =>
@@ -423,9 +577,11 @@ export const useGameStore = create<GameState>((set, get) => ({
         trips: [...state.trips, trip],
         vehicles: updatedVehicles,
         commissions: updatedCommissions,
+        clerks: updatedClerks,
         selectedCommissions: [],
         selectedVehicle: null,
         selectedRoute: null,
+        selectedEscortClerkId: null,
       });
       
       await get().saveGame();
@@ -576,7 +732,15 @@ export const useGameStore = create<GameState>((set, get) => ({
     
     const loadCalc = calculateLoad(vehicle, commissions, state.goodsList);
     
+    const escortClerk = state.clerks.find(c => c.assignedTripId === tripId);
+    let escortBonus = null;
+    if (escortClerk) {
+      escortBonus = calculateCombinedBonus([escortClerk], 'escort');
+    }
+    
     const routeCalc = calculateRouteTime(route, vehicle, weather);
+    
+    const adjustedPriceBonus = state.player.priceBonus + (escortBonus?.negotiationBonus || 0);
     
     const settlement = settleTrip(
       trip,
@@ -586,15 +750,60 @@ export const useGameStore = create<GameState>((set, get) => ({
       route.condition,
       loadCalc.isOverloaded,
       trip.eventEffects,
-      state.player.priceBonus,
+      adjustedPriceBonus,
       routeCalc.totalTime
     );
+    
+    if (escortBonus && escortBonus.damageReduction > 0) {
+      settlement.totalProfit += Math.floor(settlement.totalProfit * escortBonus.damageReduction * 0.5);
+      settlement.totalIncome = Math.floor(settlement.totalIncome * (1 + escortBonus.rewardBonus * 0.3));
+      settlement.totalProfit = settlement.totalIncome - settlement.totalExpense;
+    }
+    
+    if (escortClerk) {
+      settlement.escortClerkId = escortClerk.id;
+    }
+    
+    const mistakeResult = escortClerk ? checkForMistake([escortClerk], 'escort') : { madeMistake: false, severity: 'minor' as const };
+    let mistakeDescription = '';
+    
+    if (mistakeResult.madeMistake && mistakeResult.clerk) {
+      switch (mistakeResult.severity) {
+        case 'minor':
+          settlement.totalProfit = Math.floor(settlement.totalProfit * 0.95);
+          mistakeDescription = `${mistakeResult.clerk.name}在押运时疏忽，导致轻微损失`;
+          break;
+        case 'moderate':
+          settlement.totalProfit = Math.floor(settlement.totalProfit * 0.85);
+          settlement.reputationChange -= 3;
+          mistakeDescription = `${mistakeResult.clerk.name}在运输途中出了差错，导致部分货物受损`;
+          break;
+        case 'major':
+          settlement.totalProfit = Math.floor(settlement.totalProfit * 0.7);
+          settlement.reputationChange -= 8;
+          mistakeDescription = `${mistakeResult.clerk.name}犯了严重错误，货物遭受重大损失`;
+          break;
+      }
+    }
     
     const ledgerEntries = generateLedgerEntries(
       settlement,
       state.player.currentDay,
       getCurrentDate(state.player.currentDay)
     ).map(e => ({ ...e, id: generateId(), createdAt: Date.now() }));
+    
+    if (mistakeDescription) {
+      ledgerEntries.push({
+        id: generateId(),
+        type: 'expense',
+        description: mistakeDescription,
+        amount: Math.floor(settlement.totalIncome * 0.05),
+        date: getCurrentDate(state.player.currentDay),
+        day: state.player.currentDay,
+        category: '伙计失误',
+        createdAt: Date.now(),
+      });
+    }
     
     const arrivalGameHours = calculateTotalGameHours(state.player.currentDay, state.player.timeOfDay);
     const updatedCommissions = state.commissions.map(c => {
@@ -612,6 +821,45 @@ export const useGameStore = create<GameState>((set, get) => ({
       v.id === trip.vehicleId ? { ...v, isAvailable: true } : v
     );
     
+    let updatedClerks = state.clerks;
+    if (escortClerk) {
+      updatedClerks = state.clerks.map(c => {
+        if (c.id === escortClerk.id) {
+          let updated = increaseClerkFatigue(c, Math.floor(routeCalc.totalTime * 2));
+          const expGain = Math.floor(settlement.totalProfit / 100) + 20;
+          updated = addClerkExperience(updated, expGain);
+          updated.totalTasksCompleted += 1;
+          updated.assignedTripId = undefined;
+          updated.status = 'available';
+          updated.assignment = 'idle';
+          
+          if (mistakeResult.madeMistake && mistakeResult.clerk?.id === c.id) {
+            updated.totalMistakes += 1;
+            updated.performanceScore = Math.max(0, updated.performanceScore - 10);
+          } else {
+            updated.performanceScore = Math.min(100, updated.performanceScore + 3);
+          }
+          
+          return updated;
+        }
+        return c;
+      });
+    }
+    
+    const warehouseClerks = state.clerks.filter(c => c.assignment === 'warehouse' && c.status !== 'resting');
+    if (warehouseClerks.length > 0) {
+      updatedClerks = updatedClerks.map(c => {
+        if (c.assignment === 'warehouse' && c.status !== 'resting') {
+          let updated = increaseClerkFatigue(c, 5);
+          updated = addClerkExperience(updated, 8);
+          updated.totalTasksCompleted += 1;
+          updated.performanceScore = Math.min(100, updated.performanceScore + 1);
+          return updated;
+        }
+        return c;
+      });
+    }
+    
     const updatedTrips = state.trips.map(t =>
       t.id === tripId ? {
         ...t,
@@ -625,6 +873,9 @@ export const useGameStore = create<GameState>((set, get) => ({
       state.player.reputation + settlement.reputationChange
     ));
     const repInfo = calculateReputationGrade(newReputation);
+    
+    const warehouseBonus = state.getClerkBonuses('warehouse');
+    const adjustedCapacity = Math.floor(state.warehouse.capacity * (1 + warehouseBonus.capacityBonus));
     
     const usedSpace = calculateWarehouseUsedSpace(
       updatedCommissions,
@@ -644,7 +895,8 @@ export const useGameStore = create<GameState>((set, get) => ({
       vehicles: updatedVehicles,
       trips: updatedTrips,
       ledger: [...state.ledger, ...ledgerEntries],
-      warehouse: { ...state.warehouse, usedSpace },
+      clerks: updatedClerks,
+      warehouse: { ...state.warehouse, usedSpace, capacity: adjustedCapacity },
       currentSettlement: settlement,
       showSettlement: true,
       currentTripId: null,
@@ -708,14 +960,60 @@ export const useGameStore = create<GameState>((set, get) => ({
     const newPlayer = advanceTime(state.player);
     
     let weather = state.currentWeather;
+    let newClerks = state.clerks;
+    let newCandidates = state.clerkCandidates;
+    let newLastRefresh = state.lastClerkRefreshDay;
+    let newLedger = [...state.ledger];
+    
     if (newPlayer.timeOfDay === 'morning') {
       weather = getRandomWeather(state.weatherList);
       get().generateDailyCommissions();
+      
+      if (newPlayer.currentDay !== state.player.currentDay) {
+        const totalSalary = state.clerks
+          .filter(c => c.status !== 'dismissed')
+          .reduce((sum, c) => sum + c.salary, 0);
+        
+        if (totalSalary > 0) {
+          newPlayer.gold -= totalSalary;
+          
+          const salaryEntry: LedgerEntry = {
+            id: generateId(),
+            type: 'expense',
+            description: `伙计薪水 (${state.clerks.filter(c => c.status !== 'dismissed').length}人)`,
+            amount: totalSalary,
+            date: getCurrentDate(newPlayer.currentDay),
+            day: newPlayer.currentDay,
+            category: '人力',
+            createdAt: Date.now(),
+          };
+          newLedger.push(salaryEntry);
+          api.ledger.post(salaryEntry);
+          
+          newClerks = newClerks.map(c => {
+            if (c.status !== 'dismissed') {
+              let updated = { ...c, daysEmployed: c.daysEmployed + 1 };
+              updated = addClerkExperience(updated, 2);
+              return updated;
+            }
+            return c;
+          });
+        }
+        
+        if (newPlayer.currentDay - state.lastClerkRefreshDay >= 3) {
+          newCandidates = generateClerkCandidates(4);
+          newLastRefresh = newPlayer.currentDay;
+        }
+      }
     }
     
     set({
       player: newPlayer,
       currentWeather: weather,
+      clerks: newClerks,
+      clerkCandidates: newCandidates,
+      lastClerkRefreshDay: newLastRefresh,
+      ledger: newLedger,
     });
     
     get().saveGame();
@@ -757,5 +1055,200 @@ export const useGameStore = create<GameState>((set, get) => ({
   
   getCurrentDate: () => {
     return getCurrentDate(get().player.currentDay);
+  },
+  
+  hireClerk: (candidateId: string) => {
+    const state = get();
+    const candidate = state.clerkCandidates.find(c => c.id === candidateId);
+    if (!candidate) return false;
+    
+    const currentClerks = state.clerks.filter(c => c.status !== 'dismissed').length;
+    const maxClerks = 8;
+    if (currentClerks >= maxClerks) {
+      set({ error: `伙计数量已达上限 (${currentClerks}/${maxClerks})` });
+      return false;
+    }
+    
+    if (state.player.gold < candidate.salary * 3) {
+      set({ error: '金币不足，无法支付招募费用' });
+      return false;
+    }
+    
+    const newClerk = hireClerkLogic(candidate);
+    
+    const hireFee = candidate.salary * 3;
+    const newLedgerEntry: LedgerEntry = {
+      id: generateId(),
+      type: 'expense',
+      description: `招募 ${newClerk.name} (${getClerkTypeInfo(candidate.type).name})`,
+      amount: hireFee,
+      date: getCurrentDate(state.player.currentDay),
+      day: state.player.currentDay,
+      category: '招募',
+      createdAt: Date.now(),
+    };
+    
+    set({
+      clerks: [...state.clerks, newClerk],
+      clerkCandidates: state.clerkCandidates.filter(c => c.id !== candidateId),
+      player: { ...state.player, gold: state.player.gold - hireFee },
+      ledger: [...state.ledger, newLedgerEntry],
+    });
+    
+    api.ledger.post(newLedgerEntry);
+    get().saveGame();
+    
+    return true;
+  },
+  
+  dismissClerk: (clerkId: string) => {
+    const state = get();
+    const clerk = state.clerks.find(c => c.id === clerkId);
+    if (!clerk) return;
+    
+    if (clerk.status === 'working' && clerk.assignedTripId) {
+      set({ error: '该伙计正在工作中，无法解雇' });
+      return;
+    }
+    
+    const severancePay = Math.floor(clerk.salary * 2);
+    const newLedgerEntry: LedgerEntry = {
+      id: generateId(),
+      type: 'expense',
+      description: `解雇 ${clerk.name} 遣散费`,
+      amount: severancePay,
+      date: getCurrentDate(state.player.currentDay),
+      day: state.player.currentDay,
+      category: '人力',
+      createdAt: Date.now(),
+    };
+    
+    set({
+      clerks: state.clerks.map(c =>
+        c.id === clerkId ? { ...c, status: 'dismissed' } : c
+      ),
+      player: { ...state.player, gold: Math.max(0, state.player.gold - severancePay) },
+      ledger: [...state.ledger, newLedgerEntry],
+    });
+    
+    api.ledger.post(newLedgerEntry);
+    get().saveGame();
+  },
+  
+  assignClerk: (clerkId: string, assignment: ClerkAssignment) => {
+    const state = get();
+    const clerk = state.clerks.find(c => c.id === clerkId);
+    if (!clerk || clerk.status === 'dismissed') return;
+    
+    if (clerk.status === 'working' && clerk.assignedTripId) {
+      set({ error: '该伙计正在工作中' });
+      return;
+    }
+    
+    set({
+      clerks: state.clerks.map(c =>
+        c.id === clerkId ? { ...c, assignment, status: assignment === 'idle' ? 'available' : 'working' } : c
+      ),
+    });
+    
+    get().saveGame();
+  },
+  
+  restClerk: (clerkId: string) => {
+    const state = get();
+    const clerk = state.clerks.find(c => c.id === clerkId);
+    if (!clerk || clerk.status === 'dismissed') return;
+    
+    if (clerk.status === 'working' && clerk.assignedTripId) {
+      set({ error: '该伙计正在工作中，无法休息' });
+      return;
+    }
+    
+    set({
+      clerks: state.clerks.map(c =>
+        c.id === clerkId ? restClerkLogic(c) : c
+      ),
+    });
+    
+    get().saveGame();
+  },
+  
+  refreshClerkCandidates: () => {
+    const state = get();
+    const refreshCost = 50;
+    
+    if (state.player.gold < refreshCost) {
+      set({ error: '金币不足' });
+      return;
+    }
+    
+    const newLedgerEntry: LedgerEntry = {
+      id: generateId(),
+      type: 'expense',
+      description: '刷新候选名单',
+      amount: refreshCost,
+      date: getCurrentDate(state.player.currentDay),
+      day: state.player.currentDay,
+      category: '招募',
+      createdAt: Date.now(),
+    };
+    
+    set({
+      clerkCandidates: generateClerkCandidates(4),
+      lastClerkRefreshDay: state.player.currentDay,
+      player: { ...state.player, gold: state.player.gold - refreshCost },
+      ledger: [...state.ledger, newLedgerEntry],
+    });
+    
+    api.ledger.post(newLedgerEntry);
+    get().saveGame();
+  },
+  
+  payClerkSalaries: () => {
+    const state = get();
+    const activeClerks = state.clerks.filter(c => c.status !== 'dismissed');
+    const totalSalary = activeClerks.reduce((sum, c) => sum + c.salary, 0);
+    
+    if (totalSalary === 0) {
+      set({ error: '没有需要支付薪水的伙计' });
+      return;
+    }
+    
+    if (state.player.gold < totalSalary) {
+      set({ error: '金币不足，无法支付薪水' });
+      return;
+    }
+    
+    const newLedgerEntry: LedgerEntry = {
+      id: generateId(),
+      type: 'expense',
+      description: `提前支付伙计薪水 (${activeClerks.length}人)`,
+      amount: totalSalary,
+      date: getCurrentDate(state.player.currentDay),
+      day: state.player.currentDay,
+      category: '人力',
+      createdAt: Date.now(),
+    };
+    
+    set({
+      player: { ...state.player, gold: state.player.gold - totalSalary },
+      ledger: [...state.ledger, newLedgerEntry],
+    });
+    
+    api.ledger.post(newLedgerEntry);
+    get().saveGame();
+  },
+  
+  getClerkBonuses: (assignment: ClerkAssignment) => {
+    return calculateCombinedBonus(get().clerks, assignment);
+  },
+  
+  getAvailableClerks: (assignment?: ClerkAssignment) => {
+    const state = get();
+    let clerks = state.clerks.filter(c => c.status !== 'dismissed' && !c.assignedTripId);
+    if (assignment) {
+      clerks = clerks.filter(c => c.assignment === assignment || c.assignment === 'idle');
+    }
+    return clerks;
   },
 }));

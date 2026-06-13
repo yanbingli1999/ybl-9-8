@@ -7,6 +7,7 @@ import RoutePlanner from './components/route/RoutePlanner';
 import TransportManager from './components/transport/TransportManager';
 import Warehouse from './components/warehouse/Warehouse';
 import Ledger from './components/ledger/Ledger';
+import ClerkManager from './components/clerk/ClerkManager';
 import EventModal from './components/transport/EventModal';
 import SettlementModal from './components/settlement/SettlementModal';
 import { useGameStore } from './store/useGameStore';
@@ -59,6 +60,7 @@ export default function App() {
               <Route path="/route" element={<RoutePlanner />} />
               <Route path="/transport" element={<TransportManager />} />
               <Route path="/warehouse" element={<Warehouse />} />
+              <Route path="/clerks" element={<ClerkManager />} />
               <Route path="/ledger" element={<Ledger />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>

@@ -153,6 +153,68 @@ export interface Player {
   timeOfDay: 'morning' | 'afternoon' | 'evening' | 'night';
 }
 
+export type ClerkType = 'accountant' | 'porter' | 'guide' | 'guard';
+export type ClerkPersonality = 'diligent' | 'careful' | 'bold' | 'cautious' | 'cheerful' | 'gloomy' | 'shrewd' | 'honest';
+export type ClerkSpecialty = 'reception' | 'organization' | 'navigation' | 'combat' | 'negotiation' | 'maintenance';
+export type ClerkAssignment = 'idle' | 'reception' | 'warehouse' | 'escort';
+export type ClerkStatus = 'available' | 'working' | 'resting' | 'dismissed';
+
+export interface ClerkAbility {
+  id: string;
+  name: string;
+  description: string;
+  unlocked: boolean;
+  requiredLevel: number;
+  effect: {
+    type: 'reward_bonus' | 'damage_reduction' | 'speed_bonus' | 'fatigue_reduction' | 'capacity_bonus' | 'negotiation_bonus' | 'mistake_chance_reduction';
+    value: number;
+  };
+}
+
+export interface ClerkBonus {
+  rewardBonus: number;
+  damageReduction: number;
+  speedBonus: number;
+  capacityBonus: number;
+  negotiationBonus: number;
+  mistakeChance: number;
+  fatigueReduction: number;
+}
+
+export interface Clerk {
+  id: string;
+  type: ClerkType;
+  name: string;
+  personality: ClerkPersonality;
+  specialty: ClerkSpecialty;
+  salary: number;
+  fatigue: number;
+  maxFatigue: number;
+  level: number;
+  experience: number;
+  experienceToNextLevel: number;
+  status: ClerkStatus;
+  assignment: ClerkAssignment;
+  assignedTripId?: string;
+  abilities: ClerkAbility[];
+  daysEmployed: number;
+  performanceScore: number;
+  totalMistakes: number;
+  totalTasksCompleted: number;
+  hiredAt: number;
+}
+
+export interface ClerkCandidate {
+  id: string;
+  type: ClerkType;
+  name: string;
+  personality: ClerkPersonality;
+  specialty: ClerkSpecialty;
+  salary: number;
+  description: string;
+  traits: string[];
+}
+
 export interface SaveGame {
   player: Player;
   commissions: Commission[];
@@ -160,6 +222,9 @@ export interface SaveGame {
   vehicles: PlayerVehicle[];
   warehouse: Warehouse;
   ledger: LedgerEntry[];
+  clerks: Clerk[];
+  clerkCandidates: ClerkCandidate[];
+  lastClerkRefreshDay: number;
   currentWeatherId: string;
   savedAt: number;
 }
@@ -180,4 +245,5 @@ export interface SettlementResult {
   totalProfit: number;
   reputationChange: number;
   events: string[];
+  escortClerkId?: string;
 }

@@ -1,17 +1,19 @@
 import { NavLink } from 'react-router-dom';
-import { Anchor, Map, Truck, Warehouse, BookOpen, Clock } from 'lucide-react';
+import { Anchor, Map, Truck, Warehouse, BookOpen, Clock, Users } from 'lucide-react';
 import { useGameStore } from '../../store/useGameStore';
 
 const Sidebar = () => {
-  const { advanceTimeOfDay, player, trips, currentTripId, showEvent, showSettlement } = useGameStore();
+  const { advanceTimeOfDay, player, trips, currentTripId, showEvent, showSettlement, clerks } = useGameStore();
   
   const inProgressTrips = trips.filter(t => t.status === 'in_progress');
+  const activeClerks = clerks.filter(c => c.status !== 'dismissed').length;
   
   const navItems = [
     { path: '/', icon: Anchor, label: '港口大厅', time: ['morning', 'afternoon'] },
     { path: '/route', icon: Map, label: '路线规划', time: ['afternoon', 'evening'] },
     { path: '/transport', icon: Truck, label: '运输管理', time: ['evening', 'night'] },
     { path: '/warehouse', icon: Warehouse, label: '仓库管理', time: ['morning', 'afternoon', 'evening', 'night'] },
+    { path: '/clerks', icon: Users, label: '跑腿伙计', time: ['morning', 'afternoon', 'evening', 'night'] },
     { path: '/ledger', icon: BookOpen, label: '账本系统', time: ['morning', 'afternoon', 'evening', 'night'] },
   ];
 
