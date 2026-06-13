@@ -71,8 +71,13 @@ const RoutePlanner = () => {
   
   const routeCalculation = useMemo(() => {
     if (!selectedRouteData || !selectedVehicleData || !currentWeather) return null;
-    return calculateRouteTime(selectedRouteData, selectedVehicleData, currentWeather);
-  }, [selectedRouteData, selectedVehicleData, currentWeather]);
+    const adjustedWeather = escortBonus ? {
+      ...currentWeather,
+      speedModifier: currentWeather.speedModifier + escortBonus.speedBonus,
+      damageChance: Math.max(0, currentWeather.damageChance - escortBonus.damageReduction),
+    } : currentWeather;
+    return calculateRouteTime(selectedRouteData, selectedVehicleData, adjustedWeather);
+  }, [selectedRouteData, selectedVehicleData, currentWeather, escortBonus]);
   
   const loadCalculation = useMemo(() => {
     if (!selectedVehicleData || selectedCommissionsData.length === 0) return null;

@@ -875,7 +875,6 @@ export const useGameStore = create<GameState>((set, get) => ({
     const repInfo = calculateReputationGrade(newReputation);
     
     const warehouseBonus = state.getClerkBonuses('warehouse');
-    const adjustedCapacity = Math.floor(state.warehouse.capacity * (1 + warehouseBonus.capacityBonus));
     
     const usedSpace = calculateWarehouseUsedSpace(
       updatedCommissions,
@@ -896,7 +895,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       trips: updatedTrips,
       ledger: [...state.ledger, ...ledgerEntries],
       clerks: updatedClerks,
-      warehouse: { ...state.warehouse, usedSpace, capacity: adjustedCapacity },
+      warehouse: { ...state.warehouse, usedSpace },
       currentSettlement: settlement,
       showSettlement: true,
       currentTripId: null,
@@ -964,24 +963,49 @@ export const useGameStore = create<GameState>((set, get) => ({
     let newCandidates = state.clerkCandidates;
     let newLastRefresh = state.lastClerkRefreshDay;
     let newLedger = [...state.ledger];
+    let errorMessage: string | null = null;
     
     if (newPlayer.timeOfDay === 'morning') {
       weather = getRandomWeather(state.weatherList);
       get().generateDailyCommissions();
       
       if (newPlayer.currentDay !== state.player.currentDay) {
-        const totalSalary = state.clerks
-          .filter(c => c.status !== 'dismissed')
-          .reduce((sum, c) => sum + c.salary, 0);
+        const activeClerks = state.clerks.filter(c => c.status !== 'dismissed');
+        const totalSalary = activeClerks.reduce((sum, c) => sum + c.salary, 0);
         
         if (totalSalary > 0) {
-          newPlayer.gold -= totalSalary;
+          let actualSalaryPaid = 0;
+          
+          if (newPlayer.gold >= totalSalary) {
+            newPlayer.gold -= totalSalary;
+            actualSalaryPaid = totalSalary;
+          } else {
+            actualSalaryPaid = Math.max(0, newPlayer.gold);
+            newPlayer.gold = 0;
+            
+            const unpaidRatio = (totalSalary - actualSalaryPaid) / totalSalary;
+            
+            errorMessage = `金币不足！仅支付了 ${actualSalaryPaid}/${totalSalary} 金币薪水，部分伙计士气下降！`;
+            
+            newClerks = newClerks.map(c => {
+              if (c.status !== 'dismissed') {
+                let updated = { ...c };
+                updated.performanceScore = Math.max(0, updated.performanceScore - Math.floor(unpaidRatio * 30));
+                
+                if (updated.performanceScore < 20 && Math.random() < unpaidRatio * 0.5) {
+                  updated.status = 'dismissed';
+                }
+                return updated;
+              }
+              return c;
+            });
+          }
           
           const salaryEntry: LedgerEntry = {
             id: generateId(),
             type: 'expense',
-            description: `伙计薪水 (${state.clerks.filter(c => c.status !== 'dismissed').length}人)`,
-            amount: totalSalary,
+            description: `伙计薪水 (${activeClerks.length}人)`,
+            amount: actualSalaryPaid,
             date: getCurrentDate(newPlayer.currentDay),
             day: newPlayer.currentDay,
             category: '人力',
@@ -1014,6 +1038,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       clerkCandidates: newCandidates,
       lastClerkRefreshDay: newLastRefresh,
       ledger: newLedger,
+      error: errorMessage,
     });
     
     get().saveGame();
